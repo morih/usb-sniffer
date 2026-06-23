@@ -1,0 +1,13 @@
+[package]
+name = "usb-sniffer"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "usb_sniffer"
+path = "src/main.rs"
+
+[dependencies]
+nusb = "0.2"
+clap = { version = "4", features = ["derive"] }
+anyhow = "1"
