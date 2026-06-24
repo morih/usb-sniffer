@@ -8,6 +8,6 @@ name = "usb_sniffer"
 path = "src/main.rs"
 
 [dependencies]
-nusb = "0.2"
+nusb = { git = "https://github.com/morih/nusb.git", branch = "main" }
 clap = { version = "4", features = ["derive"] }
 anyhow = "1"

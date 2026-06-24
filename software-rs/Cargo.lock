@@ -193,9 +193,8 @@ dependencies = [
 
 [[package]]
 name = "nusb"
-version = "0.2.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8a330b3bc7f8b4fc729a4c63164b3927eeeaced198222a3ce6b8b6e034851b7a"
+version = "0.2.4"
+source = "git+ssh://git@github.com/morih/nusb.git?branch=main#080ae445d5cbd439c397d500a5e255e47a780c9f"
 dependencies = [
  "core-foundation",
  "core-foundation-sys",

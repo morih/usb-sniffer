@@ -25,9 +25,25 @@ pub const MAX_COUNT_IN_JTAG_REQUEST: usize = 255;
 pub const DATA_ENDPOINT: u8 = 0x82;
 /// USB 2.0 High-Speed バルクエンドポイントの最大パケットサイズ
 pub const DATA_ENDPOINT_SIZE: usize = 512;
-/// 1回のバルク転送で要求するバイト数。FX2LP の AUTOIN しきい値 (512 バイト) と
-/// 同じにすることで、1 パケット受信ごとに転送が完了する。
-pub const TRANSFER_SIZE: usize = DATA_ENDPOINT_SIZE;
+/// 1回のバルク転送で要求するバイト数。FX2LP の AUTOIN しきい値 (512 バイト) の
+/// 倍数にする必要がある (ショートパケットが来ないため、必ず満たすまで完了しない)。
+///
+/// C版と同じく大きく確保する (1MB)。`nusb` 標準の `submit()` ではこのサイズだと
+/// 低トラフィック時に長時間 (実測 1〜2秒以上) 完了が来ないが、ベンダ済みの
+/// `vendor/nusb` に追加した `submit_with_timeout()` (IOKit の
+/// `ReadPipeAsyncTO`/`WritePipeAsyncTO` を使用) により、`CAPTURE_TIMEOUT` で
+/// 確実に部分データを取り出せるようになったため、スループット優先でサイズを
+/// 大きくしている。
+pub const TRANSFER_SIZE: usize = DATA_ENDPOINT_SIZE * 2000; // 1MB (C版と同じ)
+/// `data_transfer_loop` で並行して保持するバルク転送の本数 (C版と同じ)。
+const TRANSFER_COUNT: usize = 16;
+/// バルク転送1本が完了するまでドライバが待つ最大時間。
+///
+/// IOKit の `ReadPipeAsyncTO`/`WritePipeAsyncTO` にそのまま渡され、ドライバ
+/// 自身がこの時間でタイムアウトを判断する (ソフトウェア側の `AbortPipe` とは
+/// 異なり、タイムアウト時も `actual_len` が正しく報告される)。C版の
+/// `TRANSFER_TIMEOUT` と同じ値。
+const CAPTURE_TIMEOUT: Duration = Duration::from_millis(250);
 /// コントロールエンドポイント EP0 の最大パケットサイズ
 pub const USB_EP0_SIZE: usize = 64;
 
@@ -213,50 +229,48 @@ impl UsbDevice {
         Ok(())
     }
 
-    /// データエンドポイントから 16 本のバルク転送を並行実行し、
+    /// データエンドポイントから `TRANSFER_COUNT` 本のバルク転送を並行実行し、
     /// 受信データを `on_data` コールバックに渡し続ける無限ループ。
     ///
-    /// 完了したらすぐ同サイズで再サブミットする。
+    /// `submit_with_timeout` (vendor 済みの nusb に追加した、IOKit
+    /// `ReadPipeAsyncTO`/`WritePipeAsyncTO` を使うメソッド) により、各転送は
+    /// TRANSFER_SIZE バイト分のデータが自然に蓄積されるか、`CAPTURE_TIMEOUT`
+    /// が経過するかのいずれか早い方で完了する。タイムアウト時もドライバが
+    /// `actual_len` を正しく報告するため、低トラフィック時でも最大
+    /// `CAPTURE_TIMEOUT` の遅延でデータが届く。
     pub fn data_transfer_loop(&self, mut on_data: impl FnMut(&[u8]) -> Result<()>) -> Result<()> {
-        const TRANSFER_COUNT: usize = 16;
-
         let mut ep = self.data_endpoint()?;
 
-        // 16 本の転送をあらかじめキューに積んでおく (パイプライン化)。
-        // 1本が完了する間に残り15本が並行して進行するので、ホスト側の処理が
+        // TRANSFER_COUNT 本の転送をあらかじめキューに積んでおく (パイプライン化)。
+        // どれかが完了する間も残りは並行して進行するので、ホスト側の処理が
         // 完了通知を取りに行くまでの間も USB バス側は転送を続けられる。
-        // TRANSFER_SIZE = DATA_ENDPOINT_SIZE (512B) なので、各転送は FX2LP の
-        // AUTOIN しきい値1パケット分にちょうど一致し、パケットが来るたびに
-        // いずれかの転送が即座に完了する。
         for _ in 0..TRANSFER_COUNT {
-            ep.submit(Buffer::new(TRANSFER_SIZE));
+            ep.submit_with_timeout(Buffer::new(TRANSFER_SIZE), CAPTURE_TIMEOUT, CAPTURE_TIMEOUT);
         }
 
         loop {
-            // Duration::MAX でタイムアウトなしのブロッキング待ち。
-            // pending な転送が必ず1本以上あるため None (タイムアウト) は来ない。
+            // 各転送に IOKit ネイティブのタイムアウトが設定済みなので、
+            // ここでの待ち自体には上限を設ける必要がない。
             let completion = ep.wait_next_complete(Duration::MAX)
                 .expect("wait_next_complete should not time out with Duration::MAX");
 
             match completion.status {
-                Ok(()) => {
-                    if !completion.buffer.is_empty() {
-                        on_data(&completion.buffer)?;
-                    }
-                }
-                // cancel_all() が呼ばれた (= 呼び出し元がループを止めたい) ことを示す。
-                // 現在の実装では誰も cancel_all() を呼ばないため到達しないが、
-                // 将来的な中断対応のために区別して扱う。
-                Err(nusb::transfer::TransferError::Cancelled) => break,
+                Ok(()) => {}
+                // CAPTURE_TIMEOUT による部分完了。actual_len 分のデータは
+                // ドライバが正しく報告するので、エラーとしては扱わず
+                // そのまま処理する (AbortPipe によるキャンセルとは違い
+                // データが失われない)。
+                Err(nusb::transfer::TransferError::Cancelled) => {}
                 Err(e) => bail!("USB bulk transfer error: {e}"),
+            }
+            if !completion.buffer.is_empty() {
+                on_data(&completion.buffer)?;
             }
 
             // 消費したスロットを即座に同サイズで再サブミットし、
             // 常に TRANSFER_COUNT 本のパイプラインを維持する。
-            ep.submit(Buffer::new(TRANSFER_SIZE));
+            ep.submit_with_timeout(Buffer::new(TRANSFER_SIZE), CAPTURE_TIMEOUT, CAPTURE_TIMEOUT);
         }
-
-        Ok(())
     }
 
     /// FPGA が生成するテストパターンを受信して転送速度を計測する。
