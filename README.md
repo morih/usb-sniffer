@@ -98,7 +98,7 @@ Pre-built binaries are provided for [Linux](bin/usb_sniffer_linux) and
 [Windows](bin/usb_sniffer_win.exe).
 
 To use with Wireshark, copy the file into the extcap plugin directory. Typical
-locations are `~/.local/lib/wireshark/extcap` on Linux, and
+locations are `~/.local/lib/wireshark/extcap` on Linux or Mac, and
 `C:/Users/<user>/AppData/Roaming/Wireshark/extcap/` on Windows. The exact location is
 provided in the `Help -> About Wireshark -> Folders -> Personal Extcap path`.
 
@@ -120,5 +120,3 @@ Here you can configure the capture speed, empty frame folding, trigger type and 
 the number of the captured packets (0 for unlimited).
 
 After interface is configured, start and stop the capture as with any other interface.
-
-
