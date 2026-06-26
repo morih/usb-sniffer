@@ -929,7 +929,12 @@ pub fn run(
     limit: i64,
     fold_empty: bool,
 ) -> Result<()> {
-    let file = std::fs::File::create(fifo_path)?;
+    // Wireshark がパイプ/FIFO を既に作成済みの状態でこの関数が呼ばれる。
+    // `File::create` (Windows では CREATE_ALWAYS) は名前付きパイプには無効な
+    // 操作で ERROR_INVALID_PARAMETER になるため、既存のパイプに書き込み用に
+    // 接続するだけの OpenOptions (Windows では OPEN_EXISTING 相当) を使う。
+    // Unix の FIFO に対しても問題なく動作する。
+    let file = std::fs::OpenOptions::new().write(true).open(fifo_path)?;
     let mut writer = BufWriter::new(file);
 
     // キャプチャ回路を初期状態にリセットしてから速度を設定して有効化する
