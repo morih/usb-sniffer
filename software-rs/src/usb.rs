@@ -29,20 +29,24 @@ pub const DATA_ENDPOINT_SIZE: usize = 512;
 /// 倍数にする必要がある (ショートパケットが来ないため、必ず満たすまで完了しない)。
 ///
 /// C版と同じく大きく確保する (1MB)。`nusb` 標準の `submit()` ではこのサイズだと
-/// 低トラフィック時に長時間 (実測 1〜2秒以上) 完了が来ないが、ベンダ済みの
-/// `vendor/nusb` に追加した `submit_with_timeout()` (IOKit の
-/// `ReadPipeAsyncTO`/`WritePipeAsyncTO` を使用) により、`CAPTURE_TIMEOUT` で
-/// 確実に部分データを取り出せるようになったため、スループット優先でサイズを
-/// 大きくしている。
+/// 低トラフィック時に長時間 (実測 1〜2秒以上) 完了が来ないが、フォーク先の
+/// nusb (`git@github.com:morih/nusb.git`) に追加した `submit_with_timeout()`
+/// により、`CAPTURE_TIMEOUT` で確実に部分データを取り出せるようになったため、
+/// スループット優先でサイズを大きくしている。
+///
+/// `submit_with_timeout()` は3プラットフォーム共通の単一 `Duration` を取る
+/// API で、各プラットフォームの既存のタイムアウト機構 (macOS:
+/// `ReadPipeAsyncTO`/`WritePipeAsyncTO`、Linux: usbfs の URB deadline、
+/// Windows: threadpool `Timer` + `CancelIoEx`) を内部で使い分けており、
+/// どのプラットフォームでもタイムアウト時に `actual_len` が正しく報告される
+/// (ソフトウェア側の `cancel_all()` を直接呼ぶ場合と異なり、macOS の
+/// `AbortPipe` のようにデータが失われることがない)。
 pub const TRANSFER_SIZE: usize = DATA_ENDPOINT_SIZE * 2000; // 1MB (C版と同じ)
 /// `data_transfer_loop` で並行して保持するバルク転送の本数 (C版と同じ)。
 const TRANSFER_COUNT: usize = 16;
-/// バルク転送1本が完了するまでドライバが待つ最大時間。
-///
-/// IOKit の `ReadPipeAsyncTO`/`WritePipeAsyncTO` にそのまま渡され、ドライバ
-/// 自身がこの時間でタイムアウトを判断する (ソフトウェア側の `AbortPipe` とは
-/// 異なり、タイムアウト時も `actual_len` が正しく報告される)。C版の
-/// `TRANSFER_TIMEOUT` と同じ値。
+/// バルク転送1本が完了するまで待つ最大時間。`submit_with_timeout()` に渡され、
+/// 各プラットフォームのドライバ/カーネル自身がこの時間でタイムアウトを
+/// 判断する。C版の `TRANSFER_TIMEOUT` と同じ値。
 const CAPTURE_TIMEOUT: Duration = Duration::from_millis(250);
 /// コントロールエンドポイント EP0 の最大パケットサイズ
 pub const USB_EP0_SIZE: usize = 64;
@@ -233,11 +237,12 @@ impl UsbDevice {
     /// 受信データを `on_data` コールバックに渡し続ける無限ループ。
     ///
     /// `submit_with_timeout` (vendor 済みの nusb に追加した、IOKit
-    /// `ReadPipeAsyncTO`/`WritePipeAsyncTO` を使うメソッド) により、各転送は
-    /// TRANSFER_SIZE バイト分のデータが自然に蓄積されるか、`CAPTURE_TIMEOUT`
-    /// が経過するかのいずれか早い方で完了する。タイムアウト時もドライバが
-    /// `actual_len` を正しく報告するため、低トラフィック時でも最大
-    /// `CAPTURE_TIMEOUT` の遅延でデータが届く。
+    /// `submit_with_timeout` (フォーク先の nusb に追加したメソッド) により、
+    /// 各転送は TRANSFER_SIZE バイト分のデータが自然に蓄積されるか、
+    /// `CAPTURE_TIMEOUT` が経過するかのいずれか早い方で完了する。タイムアウト
+    /// 時もプラットフォームのドライバ/カーネルが `actual_len` を正しく
+    /// 報告するため、低トラフィック時でも最大 `CAPTURE_TIMEOUT` の遅延で
+    /// データが届く。
     pub fn data_transfer_loop(&self, mut on_data: impl FnMut(&[u8]) -> Result<()>) -> Result<()> {
         let mut ep = self.data_endpoint()?;
 
@@ -245,11 +250,11 @@ impl UsbDevice {
         // どれかが完了する間も残りは並行して進行するので、ホスト側の処理が
         // 完了通知を取りに行くまでの間も USB バス側は転送を続けられる。
         for _ in 0..TRANSFER_COUNT {
-            ep.submit_with_timeout(Buffer::new(TRANSFER_SIZE), CAPTURE_TIMEOUT, CAPTURE_TIMEOUT);
+            ep.submit_with_timeout(Buffer::new(TRANSFER_SIZE), CAPTURE_TIMEOUT);
         }
 
         loop {
-            // 各転送に IOKit ネイティブのタイムアウトが設定済みなので、
+            // 各転送にネイティブのタイムアウトが設定済みなので、
             // ここでの待ち自体には上限を設ける必要がない。
             let completion = ep.wait_next_complete(Duration::MAX)
                 .expect("wait_next_complete should not time out with Duration::MAX");
@@ -257,9 +262,8 @@ impl UsbDevice {
             match completion.status {
                 Ok(()) => {}
                 // CAPTURE_TIMEOUT による部分完了。actual_len 分のデータは
-                // ドライバが正しく報告するので、エラーとしては扱わず
-                // そのまま処理する (AbortPipe によるキャンセルとは違い
-                // データが失われない)。
+                // 各プラットフォームのドライバ/カーネルが正しく報告するので、
+                // エラーとしては扱わずそのまま処理する。
                 Err(nusb::transfer::TransferError::Cancelled) => {}
                 Err(e) => bail!("USB bulk transfer error: {e}"),
             }
@@ -269,7 +273,7 @@ impl UsbDevice {
 
             // 消費したスロットを即座に同サイズで再サブミットし、
             // 常に TRANSFER_COUNT 本のパイプラインを維持する。
-            ep.submit_with_timeout(Buffer::new(TRANSFER_SIZE), CAPTURE_TIMEOUT, CAPTURE_TIMEOUT);
+            ep.submit_with_timeout(Buffer::new(TRANSFER_SIZE), CAPTURE_TIMEOUT);
         }
     }
 
