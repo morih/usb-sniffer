@@ -1,5 +1,8 @@
 # Low-cost USB Sniffer (LS/FS/HS) with Wireshark interface
 
+> **This repository contains a Rust port of the host software, ported with the assistance of Claude (Anthropic). The original https://github.com/ataradov/usb-sniffer.
+> Operation has been verified on Windows and macOS.**
+
 This sniffer can be used standalone from a command line or as a plugin for
 [Wireshark](https://www.wireshark.org/) with direct control from the UI.
 
