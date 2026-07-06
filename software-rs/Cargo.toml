@@ -8,6 +8,6 @@ name = "usb_sniffer"
 path = "src/main.rs"
 
 [dependencies]
-nusb = { git = "https://github.com/morih/nusb.git", branch = "main" }
+nusb = { git = "https://github.com/morih/nusb.git", branch = "feature/bulk-transfer-timeout" }
 clap = { version = "4", features = ["derive"] }
 anyhow = "1"

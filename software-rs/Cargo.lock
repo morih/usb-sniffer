@@ -194,7 +194,7 @@ dependencies = [
 [[package]]
 name = "nusb"
 version = "0.2.4"
-source = "git+https://github.com/morih/nusb.git?branch=main#ab12731b30049576ae252fd75171e68cc6d03185"
+source = "git+https://github.com/morih/nusb.git?branch=feature%2Fbulk-transfer-timeout#ab12731b30049576ae252fd75171e68cc6d03185"
 dependencies = [
  "core-foundation",
  "core-foundation-sys",
